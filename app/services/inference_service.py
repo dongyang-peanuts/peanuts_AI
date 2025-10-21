@@ -353,3 +353,60 @@ def predict_from_text(raw_text: object) -> dict:
         "bedsore_risk_percent": bed,
         "diseases": diseases_out,
     }
+
+# app/services/inference_service.py (맨 아래 근처)
+import requests
+
+def fetch_user_from_spring(user_key: int) -> dict:
+    url = f"http://kongback.kro.kr:8080/admin/users/{user_key}"
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+def user_data_to_text(user_json: dict, patient_index: int = 0) -> str:
+    def get(d, k, default=""):
+        v = d.get(k, default) if isinstance(d, dict) else default
+        return v if v is not None else default
+
+    patients = get(user_json, "patients", [])
+    if not patients:
+        return ""
+
+    idx = max(0, min(patient_index, len(patients)-1))
+    p = patients[idx]
+
+    paAge  = get(p, "paAge", "")
+    paHei  = get(p, "paHei", "")
+    paWei  = get(p, "paWei", "")
+    mobility = ""
+    disease  = ""
+    severity = ""
+    meds     = ""
+    exti     = ""
+
+    infos = get(p, "infos", [])
+    if infos:
+        main = infos[0]
+        mobility = get(main, "paBest", "")
+        disease  = get(main, "paDi", "")
+        severity = get(main, "paDise", "")
+        meds     = get(main, "paMedi", "")
+        exti     = get(main, "paExti", "")
+
+    parts = []
+    if paAge != "": parts.append(f"{paAge}세 환자")
+    if disease:
+        parts.append(f"{disease}" + (f"({severity})" if severity else ""))
+    if mobility: parts.append(mobility)
+    if meds: parts.append(f"복용 약: {meds}")
+    if paHei: parts.append(f"키 {paHei}cm")
+    if paWei: parts.append(f"체중 {paWei}kg")
+    if exti: parts.append(f"운동/활동: {exti}")
+
+    # 간단 과거력 힌트(키워드 기반)
+    base = " ".join(parts)
+    if "낙상" in base: parts.append("낙상 병력")
+    if "욕창" in base: parts.append("욕창 병력")
+
+    return ", ".join(parts).strip()
+
