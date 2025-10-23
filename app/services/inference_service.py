@@ -133,14 +133,15 @@ def _scale_to_percent(arr: np.ndarray) -> np.ndarray:
 # =========================
 def _heuristic_scores_kor(text: str) -> Tuple[float, float]:
     """
-    간단 한국어 휴리스틱: 키워드 기반 점수 (0~100). 임시/보수적.
+    한국어 휴리스틱: 키워드/정규식 기반 점수 (0~100).
+    낙상/욕창 이력 N회, 거동 상태, 만성질환, BMI 등을 반영.
     """
     t = text
-    score_fall = 0.0
-    score_bed = 0.0
+    score_fall = 5.0   # 약간의 베이스
+    score_bed  = 5.0
 
-    # 나이
     import re
+    # 나이
     age = None
     m = re.search(r"(\d+)\s*세", t)
     if m:
@@ -149,46 +150,89 @@ def _heuristic_scores_kor(text: str) -> Tuple[float, float]:
         except Exception:
             age = None
     if age is not None:
-        if age >= 80:
-            score_fall += 25
-            score_bed += 15
+        if age >= 85:
+            score_fall += 28; score_bed += 18
+        elif age >= 80:
+            score_fall += 25; score_bed += 15
         elif age >= 70:
-            score_fall += 18
-            score_bed += 10
+            score_fall += 18; score_bed += 10
         elif age >= 60:
-            score_fall += 10
-            score_bed += 5
+            score_fall += 10; score_bed += 6
+        # 젊다고 0으로 깎지는 않음(낙상 이력이 큰 경우가 있어서)
 
-    # 보행/이동
-    if any(k in t for k in ["보행 보조", "워커", "보행 불안정", "부축", "휠체어", "침상안정"]):
-        score_fall += 25
-        score_bed += 10
+    # BMI
+    bmi = None
+    m_bmi = re.search(r"BMI\s*([0-9]+(?:\.[0-9]+)?)", t)
+    if m_bmi:
+        try:
+            bmi = float(m_bmi.group(1))
+        except Exception:
+            bmi = None
+    if bmi is not None:
+        if bmi < 16:
+            score_bed += 20
+        elif bmi < 18.5:
+            score_bed += 10
+
+    # 거동/이동 — 세분화
+    mobility_strong = ["침상안정", "휠체어", "완전 부동", "전신 부동"]
+    mobility_mid    = ["보행 보조", "워커", "보행 불안정", "부축", "지팡이", "보행 보조기"]
+    if any(k in t for k in mobility_strong):
+        score_fall += 28; score_bed += 35
+    elif any(k in t for k in mobility_mid):
+        score_fall += 22; score_bed += 14
     if "자가보행 가능" in t or "독립 보행" in t:
-        score_fall += 0  # 완충
+        score_fall += 0
 
     # 인지/의식
     if any(k in t for k in ["치매", "섬망", "의식저하"]):
         score_fall += 15
 
-    # 과거력
-    if any(k in t for k in ["낙상 1회", "낙상 한 번", "최근 낙상"]):
-        score_fall += 15
-    if any(k in t for k in ["욕창 1회", "욕창 과거력", "욕창 병력"]):
-        score_bed += 20
+    # 낙상/욕창 이력 N회 패턴
+    fall_count = 0
+    bed_count  = 0
+    m_fall = re.search(r"낙상\s*(?:이력\s*)?(\d+)\s*회", t)
+    if m_fall:
+        fall_count = int(m_fall.group(1))
+    m_bed = re.search(r"욕창\s*(?:이력\s*)?(\d+)\s*회", t)
+    if m_bed:
+        bed_count = int(m_bed.group(1))
 
-    # 만성질환 / 저영양 / 당뇨 / 순환
-    if any(k in t for k in ["당뇨", "고혈압", "뇌졸중", "파킨슨", "심부전"]):
-        score_fall += 7
-    if any(k in t for k in ["저영양", "체중감소", "침상", "장기부동"]):
-        score_bed += 15
+    # 낙상 이력 가중치 (강화)
+    if fall_count >= 1:
+        # 1회: +20, 2~3회: +30, 4~6회: +40, 7회 이상: +55, 추가로 회당 +2(최대 +20)
+        if fall_count == 1:
+            score_fall += 20
+        elif fall_count <= 3:
+            score_fall += 30
+        elif fall_count <= 6:
+            score_fall += 40
+        else:
+            score_fall += 55
+        score_fall += min(fall_count * 2, 20)
+    # 욕창 이력 가중치
+    if bed_count >= 1:
+        base = 20 if bed_count == 1 else 26
+        score_bed += base + min((bed_count - 1) * 3, 15)
 
-    # 피부/압박 위험
-    if any(k in t for k in ["피부손상", "발적", "압박", "욕창 의심"]):
-        score_bed += 20
+    # 만성질환/동반질환 키워드
+    if "당뇨" in t:
+        score_fall += 4   # 저혈당/어지럼 연관
+        score_bed  += 5   # 상처 치유 지연/피부 위험
+    if "파킨슨" in t or "뇌졸중" in t or "중풍" in t:
+        score_fall += 12
+    if "심부전" in t or "부정맥" in t:
+        score_fall += 6
+    if "고혈압" in t:
+        score_fall += 3   # 직접보단 간접 영향
+
+    # 피부/압박 위험 키워드
+    if any(k in t for k in ["피부손상", "발적", "압박", "욕창 의심", "궤양"]):
+        score_bed += 18
 
     # 범위 보정
     score_fall = max(0.0, min(100.0, score_fall))
-    score_bed = max(0.0, min(100.0, score_bed))
+    score_bed  = max(0.0, min(100.0, score_bed))
     return score_fall, score_bed
 
 
@@ -199,7 +243,6 @@ def _disease_ranking_kor(text: str, age_hint: Optional[int] = None) -> List[Tupl
     """
     입력 텍스트에서 키워드/힌트를 기반으로 질병 후보에 가중치를 부여하고
     확률(%)로 정규화해 Top5를 반환.
-    추후 분류기 파인튜닝 시 이 함수를 대체하면 됨.
     """
     t = text
 
@@ -234,22 +277,20 @@ def _disease_ranking_kor(text: str, age_hint: Optional[int] = None) -> List[Tupl
         s = float(base)
         for k in keywords:
             if k in t:
-                s += 2.5  # 매칭 가중치 (튜닝 가능)
+                s += 2.5  # 매칭 가중치
         # 추가 규칙 (나이 보정)
-        if age_hint is not None:
-            if age_hint >= 80 and name in [
-                "폐렴",
-                "섬망/의식변화",
-                "욕창/피부손상",
-                "낙상 후 손상",
-                "탈수/전해질 이상",
-            ]:
-                s += 2.0
+        if age_hint is not None and age_hint >= 80 and name in [
+            "폐렴", "섬망/의식변화", "욕창/피부손상", "낙상 후 손상", "탈수/전해질 이상"
+        ]:
+            s += 2.0
         # 동반질환 보정
         if "당뇨" in t and name == "저혈당/고혈당":
+            s += 3.0
+        if "고혈압" in t and name == "뇌졸중(뇌혈관 사건)":
             s += 2.0
-        if "심부전" in t and name == "심부전 악화":
-            s += 2.0
+        if any(k in t for k in ["지팡이", "워커", "보행 보조", "보행 불안정", "부축", "휠체어"]):
+            if name in ["낙상 후 손상", "욕창/피부손상"]:
+                s += 2.0
         scores[name] = max(0.0, s)
 
     # 정규화 → 확률(%)
@@ -354,7 +395,9 @@ def predict_from_text(raw_text: object) -> dict:
         "diseases": diseases_out,
     }
 
-# app/services/inference_service.py (맨 아래 근처)
+# =========================
+#   Spring 연동 & 텍스트 생성
+# =========================
 import requests
 
 def fetch_user_from_spring(user_key: int) -> dict:
@@ -363,7 +406,23 @@ def fetch_user_from_spring(user_key: int) -> dict:
     r.raise_for_status()
     return r.json()
 
+def _try_float(x, default=None):
+    try:
+        if x is None: return default
+        if isinstance(x, (int, float)): return float(x)
+        s = str(x).strip()
+        if s == "": return default
+        return float(s)
+    except Exception:
+        return default
+
 def user_data_to_text(user_json: dict, patient_index: int = 0) -> str:
+    """
+    - infos[*].paFact/paPrct 합산 → "낙상 N회, 욕창 M회"
+    - paDi는 '낙상/욕창' 제외하고 만성질환만 나열(예: 고혈압, 당뇨)
+    - 키/몸무게가 있으면 BMI 계산하여 추가 ("BMI 23.4")
+    - 거동 상태 정규화 단어가 텍스트에 포함되도록 유지(지팡이/워커/휠체어/침상안정 등)
+    """
     def get(d, k, default=""):
         v = d.get(k, default) if isinstance(d, dict) else default
         return v if v is not None else default
@@ -378,35 +437,63 @@ def user_data_to_text(user_json: dict, patient_index: int = 0) -> str:
     paAge  = get(p, "paAge", "")
     paHei  = get(p, "paHei", "")
     paWei  = get(p, "paWei", "")
-    mobility = ""
-    disease  = ""
-    severity = ""
-    meds     = ""
-    exti     = ""
 
     infos = get(p, "infos", [])
+    mobility = ""
+    meds     = ""
+    diseases_raw = []
     if infos:
+        # 대표 1개에서 mobility/meds
         main = infos[0]
         mobility = get(main, "paBest", "")
-        disease  = get(main, "paDi", "")
-        severity = get(main, "paDise", "")
         meds     = get(main, "paMedi", "")
-        exti     = get(main, "paExti", "")
+        # 질병들 모으기(모든 infos)
+        for info in infos:
+            di = get(info, "paDi", "")
+            if not di: continue
+            # 여러 개가 콤마/슬래시로 묶여 있을 수 있음
+            for token in str(di).replace("/", ",").split(","):
+                name = token.strip()
+                if not name: continue
+                # 낙상/욕창은 질병 목록에 넣지 않음(이력으로 처리)
+                if any(x in name for x in ["낙상", "욕창"]):
+                    continue
+                diseases_raw.append(name)
+
+    # 낙상/욕창 이력 합산
+    fall_hist_total = 0
+    bedsore_hist_total = 0
+    for info in infos:
+        f = get(info, "paFact", 0)
+        b = get(info, "paPrct", 0)
+        try:
+            fall_hist_total += int(str(f).strip().split()[0])
+        except Exception:
+            pass
+        try:
+            bedsore_hist_total += int(str(b).strip().split()[0])
+        except Exception:
+            pass
+
+    # BMI 계산
+    h = _try_float(paHei, None)
+    w = _try_float(paWei, None)
+    bmi_str = ""
+    if h and w and h > 0:
+        bmi = w / ((h/100.0) ** 2)
+        bmi_str = f"BMI {round(bmi, 1)}"
 
     parts = []
     if paAge != "": parts.append(f"{paAge}세 환자")
-    if disease:
-        parts.append(f"{disease}" + (f"({severity})" if severity else ""))
+    if diseases_raw:
+        parts.append(" / ".join(diseases_raw))
     if mobility: parts.append(mobility)
     if meds: parts.append(f"복용 약: {meds}")
     if paHei: parts.append(f"키 {paHei}cm")
     if paWei: parts.append(f"체중 {paWei}kg")
-    if exti: parts.append(f"운동/활동: {exti}")
+    if bmi_str: parts.append(bmi_str)
 
-    # 간단 과거력 힌트(키워드 기반)
-    base = " ".join(parts)
-    if "낙상" in base: parts.append("낙상 병력")
-    if "욕창" in base: parts.append("욕창 병력")
+    if fall_hist_total > 0: parts.append(f"낙상 {fall_hist_total}회")
+    if bedsore_hist_total > 0: parts.append(f"욕창 {bedsore_hist_total}회")
 
     return ", ".join(parts).strip()
-
